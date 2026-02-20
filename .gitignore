@@ -1,0 +1,17 @@
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+*.pyc
+.Python
+venv/
+.venv/
+env/
+.env
+.env.production
+.env.development
+*.tmp
+*.log
+.pytest_cache/
+docker-compose.override.yml
