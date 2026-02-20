@@ -1,0 +1,32 @@
+name: EventHub
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  runtime_config:
+    name: Read runtime config
+    runs-on: ubuntu-latest
+    outputs:
+      lab: ${{ steps.read.outputs.lab }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read lab number
+        id: read
+        run: |
+          LAB=$(.github/scripts/lab_number.sh)
+          echo "lab=$LAB" >> $GITHUB_OUTPUT
+
+  autograder:
+    needs: runtime_config
+    uses: sitnikovik/ndbx/.github/workflows/eventhub.yml@main
+    with:
+      lab: ${{ needs.runtime_config.outputs.lab }}
