@@ -12,5 +12,6 @@ async def health():
 
 
 def run():
-    port = int(os.environ.get("APP_PORT", "8080"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = os.environ["APP_HOST"]
+    port = int(os.environ["APP_PORT"])
+    uvicorn.run(app, host=host, port=port)
