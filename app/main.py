@@ -1,4 +1,6 @@
 import os
+import uvicorn
+
 from fastapi import FastAPI
 
 app = FastAPI()
@@ -11,5 +13,4 @@ async def health():
 
 def run():
     port = int(os.environ.get("APP_PORT", "8080"))
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=port)
