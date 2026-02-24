@@ -1,0 +1,9 @@
+services:
+  app:
+    build: .
+    env_file: .env.local
+    environment:
+      - APP_HOST=${APP_HOST}
+      - APP_PORT=${APP_PORT}
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
