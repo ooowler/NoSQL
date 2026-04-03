@@ -63,20 +63,25 @@ async def session(x_session_id: Optional[str] = Cookie(None, alias=SESSION_COOKI
     if x_session_id and is_valid_sid(x_session_id):
         key = f"sid:{x_session_id}"
         if r.exists(key):
-            r.hset(key, "updated_at", now)
-            r.expire(key, ttl)
+            pipe = r.pipeline()
+            pipe.hset(key, "updated_at", now)
+            pipe.expire(key, ttl)
+            pipe.execute()
             response = Response(status_code=200)
             set_session_cookie(response, x_session_id)
             return response
 
-    while True:
+    sid = new_sid()
+    key = f"sid:{sid}"
+    if not r.hsetnx(key, "created_at", now):
         sid = new_sid()
         key = f"sid:{sid}"
-        created = r.hsetnx(key, "created_at", now)
-        if created:
-            r.hset(key, "updated_at", now)
-            r.expire(key, ttl)
-            break
+        if not r.hsetnx(key, "created_at", now):
+            raise RuntimeError("session id collision")
+    pipe = r.pipeline()
+    pipe.hset(key, "updated_at", now)
+    pipe.expire(key, ttl)
+    pipe.execute()
 
     response = Response(status_code=201)
     set_session_cookie(response, sid)
