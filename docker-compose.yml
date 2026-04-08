@@ -2,8 +2,12 @@ services:
   app:
     build: .
     env_file: .env.local
-    environment:
-      - APP_HOST=${APP_HOST}
-      - APP_PORT=${APP_PORT}
     ports:
       - "${APP_PORT}:${APP_PORT}"
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT}:6379"
