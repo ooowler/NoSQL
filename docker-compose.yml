@@ -6,8 +6,17 @@ services:
       - "${APP_PORT}:${APP_PORT}"
     depends_on:
       - redis
+      - mongodb
 
   redis:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT}:6379"
+
+  mongodb:
+    image: mongo:7
+    ports:
+      - "${MONGODB_PORT}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD}
