@@ -289,8 +289,10 @@ async def auth_login(request: Request, x_session_id: Optional[str] = Cookie(None
 @app.post("/auth/logout")
 async def auth_logout(x_session_id: Optional[str] = Cookie(None, alias=SESSION_COOKIE)):
     r = get_redis()
-    if x_session_id and is_valid_sid(x_session_id):
-        r.delete(f"sid:{x_session_id}")
+    key = f"sid:{x_session_id}" if x_session_id and is_valid_sid(x_session_id) else ""
+    if not key or not r.exists(key):
+        return Response(status_code=401)
+    r.delete(key)
     out = Response(status_code=204)
     clear_session_cookie(out)
     return out
