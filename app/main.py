@@ -231,8 +231,6 @@ async def users_register(request: Request, x_session_id: Optional[str] = Cookie(
         out = body({"message": f'invalid "{bad}" field'}, 400)
         touch_session_post(r, x_session_id, out)
         return out
-    if not x_session_id or not is_valid_sid(x_session_id) or not r.exists(f"sid:{x_session_id}"):
-        return body({"message": 'invalid "session" field'}, 400)
     for field in ("full_name", "username", "password"):
         if not non_empty_str(data.get(field)):
             out = body({"message": f'invalid "{field}" field'}, 400)
