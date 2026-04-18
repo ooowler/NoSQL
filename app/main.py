@@ -30,11 +30,13 @@ async def lifespan(fastapi_app: FastAPI):
     host = os.environ["MONGODB_HOST"]
     port = int(os.environ["MONGODB_PORT"])
     name = os.environ.get("MONGODB_DATABASE") or os.environ.get("MONGODB_DATABSE") or "eventhub"
-    uri = (
-        f"mongodb://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/{name}?authSource=admin"
-        if user
-        else f"mongodb://{host}:{port}/{name}"
-    )
+    if not user and not pwd:
+        uri = f"mongodb://{host}:{port}/{name}"
+    else:
+        uri = f"mongodb://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/{name}"
+        auth_src = (os.environ.get("MONGODB_AUTH_SOURCE") or "").strip()
+        if auth_src:
+            uri += f"?authSource={quote_plus(auth_src)}"
     client = MongoClient(uri)
     fastapi_app.state.mongo_db = client[name]
     db = fastapi_app.state.mongo_db
