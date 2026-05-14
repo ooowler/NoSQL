@@ -3,8 +3,8 @@ import os
 import re
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 from urllib.parse import quote_plus
 
 import bcrypt
@@ -21,6 +21,8 @@ from pymongo.errors import DuplicateKeyError
 SESSION_COOKIE = "X-Session-Id"
 SID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 JSON = "application/json"
+CATEGORIES = {"meetup", "concert", "exhibition", "party", "other"}
+DAY_PATTERN = re.compile(r"^\d{8}$")
 
 
 @asynccontextmanager
@@ -41,9 +43,14 @@ async def lifespan(fastapi_app: FastAPI):
     fastapi_app.state.mongo_db = client[name]
     db = fastapi_app.state.mongo_db
     db.users.create_index("username", unique=True)
-    db.events.create_index("title", unique=True)
+    title_index = db.events.index_information().get("title_1", {})
+    if title_index.get("unique"):
+        db.events.drop_index("title_1")
+    db.events.create_index("title")
     db.events.create_index([("title", 1), ("created_by", 1)])
-    db.events.create_index("created_by")
+    db.events.create_index([("created_by", "hashed")])
+    db.events.create_index("category")
+    db.events.create_index("location.city")
     yield
 
 
@@ -56,6 +63,10 @@ def get_mongo_database() -> Database:
 
 def body(data: dict, status: int) -> Response:
     return Response(content=json.dumps(data), media_type=JSON, status_code=status)
+
+
+def invalid_field(field: str) -> Response:
+    return body({"message": f'invalid "{field}" field'}, 400)
 
 
 def get_ttl() -> int:
@@ -181,6 +192,238 @@ def parse_uint_q(raw: Optional[str], default: Optional[int]) -> tuple[Optional[i
     if v < 0:
         return None, "invalid"
     return v, None
+
+
+def parse_uint_body(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def parse_day_q(raw: Optional[str]) -> tuple[Optional[datetime], Optional[str]]:
+    if raw is None:
+        return None, None
+    if not DAY_PATTERN.match(raw):
+        return None, "invalid"
+    try:
+        return datetime.strptime(raw, "%Y%m%d").replace(tzinfo=timezone.utc), None
+    except ValueError:
+        return None, "invalid"
+
+
+def as_utc_datetime(value: object) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def format_dt(value: object) -> object:
+    dt = as_utc_datetime(value)
+    if not dt:
+        return value
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def doc_ids(doc: dict[str, Any]) -> set[str]:
+    ids = set()
+    for key in ("_id", "id"):
+        if key in doc:
+            ids.add(str(doc[key]))
+    return ids
+
+
+def doc_id(doc: dict[str, Any]) -> str:
+    if "id" in doc:
+        return str(doc["id"])
+    if "_id" in doc:
+        return str(doc["_id"])
+    return ""
+
+
+def has_id(doc: dict[str, Any], raw_id: str) -> bool:
+    return raw_id in doc_ids(doc)
+
+
+def user_public(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": doc_id(doc),
+        "full_name": doc.get("full_name", ""),
+        "username": doc.get("username", ""),
+    }
+
+
+def event_value(doc: dict[str, Any], key: str) -> Any:
+    if key in doc:
+        return doc[key]
+    if key in ("title", "description", "category"):
+        return doc.get("content", {}).get(key)
+    if key == "price":
+        costs = doc.get("costs", {})
+        return costs.get("price", costs.get("amount"))
+    if key == "created_at":
+        return doc.get("created", {}).get("at")
+    if key == "created_by":
+        return doc.get("created", {}).get("by")
+    if key in ("started_at", "finished_at"):
+        return doc.get("dates", {}).get(key)
+    return None
+
+
+def event_public(doc: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": doc_id(doc),
+        "title": event_value(doc, "title"),
+    }
+    category = event_value(doc, "category")
+    price = event_value(doc, "price")
+    if category is not None:
+        out["category"] = category
+    if price is not None:
+        out["price"] = price
+    out.update(
+        {
+            "description": event_value(doc, "description"),
+            "location": doc.get("location", {}),
+            "created_at": format_dt(event_value(doc, "created_at")),
+            "created_by": str(event_value(doc, "created_by")),
+            "started_at": format_dt(event_value(doc, "started_at")),
+            "finished_at": format_dt(event_value(doc, "finished_at")),
+        }
+    )
+    return out
+
+
+def find_user(raw_id: str) -> Optional[dict[str, Any]]:
+    for doc in get_mongo_database().users.find({}):
+        if has_id(doc, raw_id):
+            return doc
+    return None
+
+
+def find_event(raw_id: str) -> Optional[dict[str, Any]]:
+    for doc in get_mongo_database().events.find({}):
+        if has_id(doc, raw_id):
+            return doc
+    return None
+
+
+def same_created_by(doc: dict[str, Any], user_id: str) -> bool:
+    return str(event_value(doc, "created_by")) == user_id
+
+
+def event_started_in_range(
+    doc: dict[str, Any],
+    date_from: Optional[datetime],
+    date_to: Optional[datetime],
+) -> bool:
+    started = as_utc_datetime(event_value(doc, "started_at"))
+    if not started:
+        return False
+    if date_from and started < date_from:
+        return False
+    if date_to and started >= date_to:
+        return False
+    return True
+
+
+def parse_event_query(
+    *,
+    limit: Optional[str],
+    offset: Optional[str],
+    raw_id: Optional[str],
+    category: Optional[str],
+    price_from: Optional[str],
+    price_to: Optional[str],
+    date_from: Optional[str],
+    date_to: Optional[str],
+    started_date_from: Optional[str],
+    started_date_to: Optional[str],
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    lim, le = parse_uint_q(limit, None)
+    if le:
+        return None, "limit"
+    off, oe = parse_uint_q(offset, 0)
+    if oe:
+        return None, "offset"
+    if raw_id is not None and not raw_id:
+        return None, "id"
+    if category is not None and category not in CATEGORIES:
+        return None, "category"
+    pf, pfe = parse_uint_q(price_from, None)
+    if pfe:
+        return None, "price_from"
+    pt, pte = parse_uint_q(price_to, None)
+    if pte:
+        return None, "price_to"
+    raw_from = date_from if date_from is not None else started_date_from
+    raw_to = date_to if date_to is not None else started_date_to
+    df, dfe = parse_day_q(raw_from)
+    if dfe:
+        return None, "date_from" if date_from is not None else "started_date_from"
+    dt, dte = parse_day_q(raw_to)
+    if dte:
+        return None, "date_to" if date_to is not None else "started_date_to"
+    if dt:
+        dt += timedelta(days=1)
+    return {
+        "limit": lim,
+        "offset": off or 0,
+        "id": raw_id,
+        "category": category,
+        "price_from": pf,
+        "price_to": pt,
+        "date_from": df,
+        "date_to": dt,
+    }, None
+
+
+def filter_events(
+    docs: list[dict[str, Any]],
+    *,
+    filters: dict[str, Any],
+    title: Optional[str] = None,
+    city: Optional[str] = None,
+    created_by_ids: Optional[set[str]] = None,
+) -> list[dict[str, Any]]:
+    result = []
+    title_lc = title.lower() if title else None
+    for doc in docs:
+        if filters["id"] and not has_id(doc, filters["id"]):
+            continue
+        if title_lc and title_lc not in str(event_value(doc, "title")).lower():
+            continue
+        if filters["category"] and event_value(doc, "category") != filters["category"]:
+            continue
+        price = event_value(doc, "price")
+        if filters["price_from"] is not None or filters["price_to"] is not None:
+            try:
+                price = int(price)
+            except (TypeError, ValueError):
+                continue
+            if filters["price_from"] is not None and price < filters["price_from"]:
+                continue
+            if filters["price_to"] is not None and price > filters["price_to"]:
+                continue
+        location = doc.get("location") or {}
+        if city is not None and location.get("city") != city:
+            continue
+        if created_by_ids is not None and str(event_value(doc, "created_by")) not in created_by_ids:
+            continue
+        if (filters["date_from"] or filters["date_to"]) and not event_started_in_range(
+            doc,
+            filters["date_from"],
+            filters["date_to"],
+        ):
+            continue
+        result.append(doc)
+    return result
 
 
 @app.get("/health")
@@ -334,6 +577,10 @@ async def events_create(request: Request, x_session_id: Optional[str] = Cookie(N
         "started_at": data["started_at"].strip(),
         "finished_at": data["finished_at"].strip(),
     }
+    if get_mongo_database().events.find_one({"title": doc["title"]}):
+        out = body({"message": "event already exists"}, 409)
+        touch_session_post(r, x_session_id, out)
+        return out
     try:
         ins = get_mongo_database().events.insert_one(doc)
     except DuplicateKeyError:
@@ -351,42 +598,249 @@ async def events_list(
     title: Optional[str] = Query(None),
     limit: Optional[str] = Query(None),
     offset: Optional[str] = Query(None),
+    id: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    price_from: Optional[str] = Query(None),
+    price_to: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    started_date_from: Optional[str] = Query(None),
+    started_date_to: Optional[str] = Query(None),
+    user: Optional[str] = Query(None),
 ):
-    lim, le = parse_uint_q(limit, None)
-    if le:
-        out = body({"message": 'invalid "limit" parameter'}, 400)
+    filters, bad = parse_event_query(
+        limit=limit,
+        offset=offset,
+        raw_id=id,
+        category=category,
+        price_from=price_from,
+        price_to=price_to,
+        date_from=date_from,
+        date_to=date_to,
+        started_date_from=started_date_from,
+        started_date_to=started_date_to,
+    )
+    if bad:
+        out = invalid_field(bad)
         echo_session_get(out, x_session_id)
         return out
-    off, oe = parse_uint_q(offset, 0)
-    if oe:
-        out = body({"message": 'invalid "offset" parameter'}, 400)
+    if city is not None and not city:
+        out = invalid_field("city")
         echo_session_get(out, x_session_id)
         return out
-    flt: dict = {}
-    if title:
-        flt["title"] = re.compile(re.escape(title), re.IGNORECASE)
-    cur = get_mongo_database().events.find(flt).sort("_id", -1).skip(off)
-    if lim is not None:
-        cur = cur.limit(lim)
-    rows = list(cur)
-    events = [
-        {
-            "id": str(d["_id"]),
-            "title": d["title"],
-            "description": d["description"],
-            "location": d["location"],
-            "created_at": d["created_at"],
-            "created_by": d["created_by"],
-            "started_at": d["started_at"],
-            "finished_at": d["finished_at"],
-        }
-        for d in rows
-    ]
+    if user is not None and not user:
+        out = invalid_field("user")
+        echo_session_get(out, x_session_id)
+        return out
+
+    created_by_ids = None
+    if user is not None:
+        created_by_ids = set()
+        for u in get_mongo_database().users.find({"username": user}):
+            created_by_ids.update(doc_ids(u))
+    rows = filter_events(
+        list(get_mongo_database().events.find({})),
+        filters=filters,
+        title=title,
+        city=city,
+        created_by_ids=created_by_ids,
+    )
+    rows = rows[filters["offset"] :]
+    if filters["limit"] is not None:
+        rows = rows[: filters["limit"]]
+    events = [event_public(d) for d in rows]
     out = Response(
         content=json.dumps({"events": events, "count": len(events)}),
         media_type=JSON,
         status_code=200,
     )
+    echo_session_get(out, x_session_id)
+    return out
+
+
+@app.get("/events/{event_id}")
+async def events_get(event_id: str, x_session_id: Optional[str] = Cookie(None, alias=SESSION_COOKIE)):
+    event = find_event(event_id)
+    if not event:
+        out = body({"message": "Not found"}, 404)
+        echo_session_get(out, x_session_id)
+        return out
+    out = body(event_public(event), 200)
+    echo_session_get(out, x_session_id)
+    return out
+
+
+@app.patch("/events/{event_id}")
+async def events_update(
+    event_id: str,
+    request: Request,
+    x_session_id: Optional[str] = Cookie(None, alias=SESSION_COOKIE),
+):
+    r = get_redis()
+    uid = session_user_id(r, x_session_id)
+    if not uid:
+        out = Response(status_code=401)
+        touch_session_post(r, x_session_id, out)
+        return out
+    data, bad = await parse_json_body(request)
+    if bad:
+        out = invalid_field(bad)
+        touch_session_post(r, x_session_id, out)
+        return out
+
+    update_set: dict[str, Any] = {}
+    update_unset: dict[str, str] = {}
+    if "category" in data:
+        if data["category"] not in CATEGORIES:
+            out = invalid_field("category")
+            touch_session_post(r, x_session_id, out)
+            return out
+        update_set["category"] = data["category"]
+    if "price" in data:
+        if not parse_uint_body(data["price"]):
+            out = invalid_field("price")
+            touch_session_post(r, x_session_id, out)
+            return out
+        update_set["price"] = data["price"]
+    if "city" in data:
+        if not isinstance(data["city"], str):
+            out = invalid_field("city")
+            touch_session_post(r, x_session_id, out)
+            return out
+        if data["city"] == "":
+            update_unset["location.city"] = ""
+        else:
+            update_set["location.city"] = data["city"]
+
+    event = find_event(event_id)
+    if not event or not same_created_by(event, uid):
+        out = body({"message": "Not found. Be sure that event exists and you are the organizer"}, 404)
+        touch_session_post(r, x_session_id, out)
+        return out
+
+    ops: dict[str, Any] = {}
+    if update_set:
+        ops["$set"] = update_set
+    if update_unset:
+        ops["$unset"] = update_unset
+    if ops:
+        get_mongo_database().events.update_one({"_id": event["_id"]}, ops)
+    out = Response(status_code=204)
+    touch_session_post(r, x_session_id, out)
+    return out
+
+
+@app.get("/users")
+async def users_list(
+    x_session_id: Optional[str] = Cookie(None, alias=SESSION_COOKIE),
+    limit: Optional[str] = Query(None),
+    offset: Optional[str] = Query(None),
+    name: Optional[str] = Query(None),
+    id: Optional[str] = Query(None),
+):
+    lim, le = parse_uint_q(limit, None)
+    if le:
+        out = invalid_field("limit")
+        echo_session_get(out, x_session_id)
+        return out
+    off, oe = parse_uint_q(offset, 0)
+    if oe:
+        out = invalid_field("offset")
+        echo_session_get(out, x_session_id)
+        return out
+    if id is not None and not id:
+        out = invalid_field("id")
+        echo_session_get(out, x_session_id)
+        return out
+    if name is not None and not name:
+        out = invalid_field("name")
+        echo_session_get(out, x_session_id)
+        return out
+
+    rows = []
+    name_lc = name.lower() if name else None
+    for doc in get_mongo_database().users.find({}):
+        if id and not has_id(doc, id):
+            continue
+        if name_lc and name_lc not in str(doc.get("full_name", "")).lower():
+            continue
+        rows.append(doc)
+    rows = rows[off or 0 :]
+    if lim is not None:
+        rows = rows[:lim]
+    users = [user_public(d) for d in rows]
+    out = body({"users": users, "count": len(users)}, 200)
+    echo_session_get(out, x_session_id)
+    return out
+
+
+@app.get("/users/{user_id}/events")
+async def users_events(
+    user_id: str,
+    x_session_id: Optional[str] = Cookie(None, alias=SESSION_COOKIE),
+    title: Optional[str] = Query(None),
+    limit: Optional[str] = Query(None),
+    offset: Optional[str] = Query(None),
+    id: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    price_from: Optional[str] = Query(None),
+    price_to: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    started_date_from: Optional[str] = Query(None),
+    started_date_to: Optional[str] = Query(None),
+):
+    user_doc = find_user(user_id)
+    if not user_doc:
+        out = body({"message": "User not found"}, 404)
+        echo_session_get(out, x_session_id)
+        return out
+    filters, bad = parse_event_query(
+        limit=limit,
+        offset=offset,
+        raw_id=id,
+        category=category,
+        price_from=price_from,
+        price_to=price_to,
+        date_from=date_from,
+        date_to=date_to,
+        started_date_from=started_date_from,
+        started_date_to=started_date_to,
+    )
+    if bad:
+        out = invalid_field(bad)
+        echo_session_get(out, x_session_id)
+        return out
+    if city is not None and not city:
+        out = invalid_field("city")
+        echo_session_get(out, x_session_id)
+        return out
+    rows = filter_events(
+        list(get_mongo_database().events.find({})),
+        filters=filters,
+        title=title,
+        city=city,
+        created_by_ids=doc_ids(user_doc),
+    )
+    rows = rows[filters["offset"] :]
+    if filters["limit"] is not None:
+        rows = rows[: filters["limit"]]
+    events = [event_public(d) for d in rows]
+    out = body({"events": events, "count": len(events)}, 200)
+    echo_session_get(out, x_session_id)
+    return out
+
+
+@app.get("/users/{user_id}")
+async def users_get(user_id: str, x_session_id: Optional[str] = Cookie(None, alias=SESSION_COOKIE)):
+    user_doc = find_user(user_id)
+    if not user_doc:
+        out = body({"message": "Not found"}, 404)
+        echo_session_get(out, x_session_id)
+        return out
+    out = body(user_public(user_doc), 200)
     echo_session_get(out, x_session_id)
     return out
 

@@ -5,15 +5,114 @@ services:
     ports:
       - "${APP_PORT}:${APP_PORT}"
     depends_on:
-      - redis
-      - mongodb
+      redis:
+        condition: service_started
+      mongo-init:
+        condition: service_completed_successfully
 
   redis:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT}:6379"
 
-  mongodb:
+  mongos:
     image: mongo:7
+    command: mongos --configdb cfg/mongo-config:${MONGODB_CONFIG_PORT} --bind_ip_all --port ${MONGODB_PORT}
     ports:
-      - "${MONGODB_PORT}:27017"
+      - "${MONGODB_PORT}:${MONGODB_PORT}"
+    depends_on:
+      - mongo-config
+    restart: unless-stopped
+
+  mongo-config:
+    image: mongo:7
+    command: mongod --configsvr --replSet cfg --bind_ip_all --port ${MONGODB_CONFIG_PORT} --dbpath /data/configdb
+    ports:
+      - "${MONGODB_CONFIG_PORT}:${MONGODB_CONFIG_PORT}"
+    volumes:
+      - mongo-config-data:/data/configdb
+
+  mongo-shard01-primary:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard01 --bind_ip_all --port ${MONGODB_SHARD01_PRIMARY_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD01_PRIMARY_PORT}:${MONGODB_SHARD01_PRIMARY_PORT}"
+    volumes:
+      - mongo-shard01-primary-data:/data/db
+
+  mongo-shard01-secondary1:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard01 --bind_ip_all --port ${MONGODB_SHARD01_SECONDARY1_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD01_SECONDARY1_PORT}:${MONGODB_SHARD01_SECONDARY1_PORT}"
+    volumes:
+      - mongo-shard01-secondary1-data:/data/db
+
+  mongo-shard01-secondary2:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard01 --bind_ip_all --port ${MONGODB_SHARD01_SECONDARY2_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD01_SECONDARY2_PORT}:${MONGODB_SHARD01_SECONDARY2_PORT}"
+    volumes:
+      - mongo-shard01-secondary2-data:/data/db
+
+  mongo-shard02-primary:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard02 --bind_ip_all --port ${MONGODB_SHARD02_PRIMARY_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD02_PRIMARY_PORT}:${MONGODB_SHARD02_PRIMARY_PORT}"
+    volumes:
+      - mongo-shard02-primary-data:/data/db
+
+  mongo-shard02-secondary1:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard02 --bind_ip_all --port ${MONGODB_SHARD02_SECONDARY1_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD02_SECONDARY1_PORT}:${MONGODB_SHARD02_SECONDARY1_PORT}"
+    volumes:
+      - mongo-shard02-secondary1-data:/data/db
+
+  mongo-shard02-secondary2:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard02 --bind_ip_all --port ${MONGODB_SHARD02_SECONDARY2_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD02_SECONDARY2_PORT}:${MONGODB_SHARD02_SECONDARY2_PORT}"
+    volumes:
+      - mongo-shard02-secondary2-data:/data/db
+
+  mongo-init:
+    image: mongo:7
+    env_file: .env.local
+    depends_on:
+      - mongos
+      - mongo-config
+      - mongo-shard01-primary
+      - mongo-shard01-secondary1
+      - mongo-shard01-secondary2
+      - mongo-shard02-primary
+      - mongo-shard02-secondary1
+      - mongo-shard02-secondary2
+    entrypoint: ["bash", "-lc"]
+    command:
+      - |
+        set -e
+        until mongosh --quiet --host mongo-config --port ${MONGODB_CONFIG_PORT} --eval 'db.adminCommand({ping: 1})' >/dev/null; do sleep 1; done
+        until mongosh --quiet --host mongo-shard01-primary --port ${MONGODB_SHARD01_PRIMARY_PORT} --eval 'db.adminCommand({ping: 1})' >/dev/null; do sleep 1; done
+        until mongosh --quiet --host mongo-shard02-primary --port ${MONGODB_SHARD02_PRIMARY_PORT} --eval 'db.adminCommand({ping: 1})' >/dev/null; do sleep 1; done
+        mongosh --quiet --host mongo-config --port ${MONGODB_CONFIG_PORT} --eval 'try { rs.status() } catch (e) { rs.initiate({_id: "cfg", configsvr: true, members: [{_id: 0, host: "mongo-config:${MONGODB_CONFIG_PORT}"}]}) }'
+        mongosh --quiet --host mongo-shard01-primary --port ${MONGODB_SHARD01_PRIMARY_PORT} --eval 'try { rs.status() } catch (e) { rs.initiate({_id: "shard01", members: [{_id: 0, host: "mongo-shard01-primary:${MONGODB_SHARD01_PRIMARY_PORT}"}, {_id: 1, host: "mongo-shard01-secondary1:${MONGODB_SHARD01_SECONDARY1_PORT}"}, {_id: 2, host: "mongo-shard01-secondary2:${MONGODB_SHARD01_SECONDARY2_PORT}"}]}) }'
+        mongosh --quiet --host mongo-shard02-primary --port ${MONGODB_SHARD02_PRIMARY_PORT} --eval 'try { rs.status() } catch (e) { rs.initiate({_id: "shard02", members: [{_id: 0, host: "mongo-shard02-primary:${MONGODB_SHARD02_PRIMARY_PORT}"}, {_id: 1, host: "mongo-shard02-secondary1:${MONGODB_SHARD02_SECONDARY1_PORT}"}, {_id: 2, host: "mongo-shard02-secondary2:${MONGODB_SHARD02_SECONDARY2_PORT}"}]}) }'
+        until mongosh --quiet --host mongo-config --port ${MONGODB_CONFIG_PORT} --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; do sleep 1; done
+        until mongosh --quiet --host mongo-shard01-primary --port ${MONGODB_SHARD01_PRIMARY_PORT} --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; do sleep 1; done
+        until mongosh --quiet --host mongo-shard02-primary --port ${MONGODB_SHARD02_PRIMARY_PORT} --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; do sleep 1; done
+        until mongosh --quiet --host mongos --port ${MONGODB_PORT} --eval 'db.adminCommand({ping: 1})' >/dev/null; do sleep 1; done
+        mongosh --quiet --host mongos --port ${MONGODB_PORT} --eval 'const admin = db.getSiblingDB("admin"); const config = db.getSiblingDB("config"); if (config.shards.countDocuments({_id: "shard01"}) === 0) { sh.addShard("shard01/mongo-shard01-primary:${MONGODB_SHARD01_PRIMARY_PORT},mongo-shard01-secondary1:${MONGODB_SHARD01_SECONDARY1_PORT},mongo-shard01-secondary2:${MONGODB_SHARD01_SECONDARY2_PORT}"); } if (config.shards.countDocuments({_id: "shard02"}) === 0) { sh.addShard("shard02/mongo-shard02-primary:${MONGODB_SHARD02_PRIMARY_PORT},mongo-shard02-secondary1:${MONGODB_SHARD02_SECONDARY1_PORT},mongo-shard02-secondary2:${MONGODB_SHARD02_SECONDARY2_PORT}"); } admin.runCommand({enableSharding: "${MONGODB_DATABASE}"}); if (config.collections.countDocuments({_id: "${MONGODB_DATABASE}.events"}) === 0) { sh.shardCollection("${MONGODB_DATABASE}.events", {created_by: "hashed"}); }'
+
+volumes:
+  mongo-config-data:
+  mongo-shard01-primary-data:
+  mongo-shard01-secondary1-data:
+  mongo-shard01-secondary2-data:
+  mongo-shard02-primary-data:
+  mongo-shard02-secondary1-data:
+  mongo-shard02-secondary2-data:
