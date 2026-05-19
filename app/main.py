@@ -41,17 +41,10 @@ async def lifespan(fastapi_app: FastAPI):
             uri += f"?authSource={quote_plus(auth_src)}"
     client = MongoClient(uri)
     fastapi_app.state.mongo_db = client[name]
-    db = fastapi_app.state.mongo_db
-    db.users.create_index("username", unique=True)
-    title_index = db.events.index_information().get("title_1", {})
-    if title_index.get("unique"):
-        db.events.drop_index("title_1")
-    db.events.create_index("title")
-    db.events.create_index([("title", 1), ("created_by", 1)])
-    db.events.create_index([("created_by", "hashed")])
-    db.events.create_index("category")
-    db.events.create_index("location.city")
-    yield
+    try:
+        yield
+    finally:
+        client.close()
 
 
 app = FastAPI(lifespan=lifespan)
