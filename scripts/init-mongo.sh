@@ -17,6 +17,19 @@ wait_primary() {
     done
 }
 
+wait_replica_set() {
+    local host="$1"
+    local port="$2"
+    local members="$3"
+    until mongosh --quiet --host "$host" --port "$port" --eval "
+const status = rs.status()
+const ready = status.members.length === ${members} && status.members.every((member) => member.health === 1 && ['PRIMARY', 'SECONDARY'].includes(member.stateStr))
+quit(ready ? 0 : 1)
+"; do
+        sleep 1
+    done
+}
+
 init_replica_sets() {
 wait_mongo mongo-config "$MONGODB_CONFIG_PORT"
 wait_mongo mongo-shard01-primary "$MONGODB_SHARD01_PRIMARY_PORT"
@@ -69,6 +82,9 @@ try {
 wait_primary mongo-config "$MONGODB_CONFIG_PORT"
 wait_primary mongo-shard01-primary "$MONGODB_SHARD01_PRIMARY_PORT"
 wait_primary mongo-shard02-primary "$MONGODB_SHARD02_PRIMARY_PORT"
+wait_replica_set mongo-config "$MONGODB_CONFIG_PORT" 1
+wait_replica_set mongo-shard01-primary "$MONGODB_SHARD01_PRIMARY_PORT" 3
+wait_replica_set mongo-shard02-primary "$MONGODB_SHARD02_PRIMARY_PORT" 3
 }
 
 init_sharding() {
@@ -79,30 +95,46 @@ const admin = db.getSiblingDB('admin')
 const config = db.getSiblingDB('config')
 const appdb = db.getSiblingDB('${MONGODB_DATABASE}')
 
+function assertOk(result, allowedCodes = []) {
+    if (result.ok === 1 || allowedCodes.includes(result.code)) {
+        return
+    }
+    printjson(result)
+    quit(1)
+}
+
 if (config.shards.countDocuments({_id: 'shard01'}) === 0) {
-    sh.addShard('shard01/mongo-shard01-primary:${MONGODB_SHARD01_PRIMARY_PORT},mongo-shard01-secondary1:${MONGODB_SHARD01_SECONDARY1_PORT},mongo-shard01-secondary2:${MONGODB_SHARD01_SECONDARY2_PORT}')
+    assertOk(admin.runCommand({
+        addShard: 'shard01/mongo-shard01-primary:${MONGODB_SHARD01_PRIMARY_PORT},mongo-shard01-secondary1:${MONGODB_SHARD01_SECONDARY1_PORT},mongo-shard01-secondary2:${MONGODB_SHARD01_SECONDARY2_PORT}'
+    }))
 }
 
 if (config.shards.countDocuments({_id: 'shard02'}) === 0) {
-    sh.addShard('shard02/mongo-shard02-primary:${MONGODB_SHARD02_PRIMARY_PORT},mongo-shard02-secondary1:${MONGODB_SHARD02_SECONDARY1_PORT},mongo-shard02-secondary2:${MONGODB_SHARD02_SECONDARY2_PORT}')
+    assertOk(admin.runCommand({
+        addShard: 'shard02/mongo-shard02-primary:${MONGODB_SHARD02_PRIMARY_PORT},mongo-shard02-secondary1:${MONGODB_SHARD02_SECONDARY1_PORT},mongo-shard02-secondary2:${MONGODB_SHARD02_SECONDARY2_PORT}'
+    }))
 }
 
-admin.runCommand({enableSharding: '${MONGODB_DATABASE}'})
-appdb.users.createIndex({username: 1}, {unique: true})
+assertOk(admin.runCommand({enableSharding: '${MONGODB_DATABASE}'}), [23])
 
 const titleIndex = appdb.events.getIndexes().find((index) => index.name === 'title_1')
 if (titleIndex && titleIndex.unique) {
     appdb.events.dropIndex('title_1')
 }
 
+if (config.collections.countDocuments({_id: '${MONGODB_DATABASE}.events'}) === 0) {
+    appdb.events.createIndex({created_by: 'hashed'})
+    assertOk(admin.runCommand({
+        shardCollection: '${MONGODB_DATABASE}.events',
+        key: {created_by: 'hashed'}
+    }), [23])
+}
+
+appdb.users.createIndex({username: 1}, {unique: true})
 appdb.events.createIndex({title: 1})
 appdb.events.createIndex({title: 1, created_by: 1})
 appdb.events.createIndex({category: 1})
 appdb.events.createIndex({'location.city': 1})
-
-if (config.collections.countDocuments({_id: '${MONGODB_DATABASE}.events'}) === 0) {
-    sh.shardCollection('${MONGODB_DATABASE}.events', {created_by: 'hashed'})
-}
 "
 }
 
