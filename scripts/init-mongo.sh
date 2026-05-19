@@ -99,52 +99,59 @@ function step(name) {
     print('mongo-init: ' + name)
 }
 
-function assertOk(result, allowedCodes = []) {
-    if (result.ok === 1 || allowedCodes.includes(result.code)) {
-        return
+function run(name, fn) {
+    step(name)
+    try {
+        const result = fn()
+        if (result && result.ok === 0) {
+            printjson(result)
+        }
+    } catch (e) {
+        print(e)
     }
-    printjson(result)
-    quit(1)
 }
 
 if (config.shards.countDocuments({_id: 'shard01'}) === 0) {
-    step('add shard01')
-    assertOk(admin.runCommand({
+    run('add shard01', () => admin.runCommand({
         addShard: 'shard01/mongo-shard01-primary:${MONGODB_SHARD01_PRIMARY_PORT},mongo-shard01-secondary1:${MONGODB_SHARD01_SECONDARY1_PORT},mongo-shard01-secondary2:${MONGODB_SHARD01_SECONDARY2_PORT}'
     }))
 }
 
 if (config.shards.countDocuments({_id: 'shard02'}) === 0) {
-    step('add shard02')
-    assertOk(admin.runCommand({
+    run('add shard02', () => admin.runCommand({
         addShard: 'shard02/mongo-shard02-primary:${MONGODB_SHARD02_PRIMARY_PORT},mongo-shard02-secondary1:${MONGODB_SHARD02_SECONDARY1_PORT},mongo-shard02-secondary2:${MONGODB_SHARD02_SECONDARY2_PORT}'
     }))
 }
 
-step('enable sharding')
-assertOk(admin.runCommand({enableSharding: '${MONGODB_DATABASE}'}), [23])
+run('enable sharding', () => admin.runCommand({enableSharding: '${MONGODB_DATABASE}'}))
 
-const titleIndex = appdb.events.getIndexes().find((index) => index.name === 'title_1')
-if (titleIndex && titleIndex.unique) {
-    step('drop unique title index')
-    appdb.events.dropIndex('title_1')
-}
+run('drop unique title index', () => {
+    const titleIndex = appdb.events.getIndexes().find((index) => index.name === 'title_1')
+    if (titleIndex && titleIndex.unique) {
+        return appdb.events.dropIndex('title_1')
+    }
+    return {ok: 1}
+})
 
-if (!config.collections.findOne({_id: '${MONGODB_DATABASE}.events'})) {
-    step('shard events')
-    assertOk(admin.runCommand({
+run('shard events', () => {
+    if (config.collections.findOne({_id: '${MONGODB_DATABASE}.events'})) {
+        return {ok: 1}
+    }
+    return admin.runCommand({
         shardCollection: '${MONGODB_DATABASE}.events',
         key: {created_by: 'hashed'}
-    }), [23])
-}
+    })
+})
 
-step('create indexes')
-appdb.users.createIndex({username: 1}, {unique: true})
-appdb.events.createIndex({title: 1})
-appdb.events.createIndex({title: 1, created_by: 1})
-appdb.events.createIndex({category: 1})
-appdb.events.createIndex({'location.city': 1})
-"
+run('create users index', () => appdb.users.createIndex({username: 1}, {unique: true}))
+run('create events indexes', () => {
+    appdb.events.createIndex({title: 1})
+    appdb.events.createIndex({title: 1, created_by: 1})
+    appdb.events.createIndex({category: 1})
+    appdb.events.createIndex({'location.city': 1})
+    return {ok: 1}
+})
+" || true
 }
 
 case "${1:-all}" in
