@@ -95,6 +95,10 @@ const admin = db.getSiblingDB('admin')
 const config = db.getSiblingDB('config')
 const appdb = db.getSiblingDB('${MONGODB_DATABASE}')
 
+function step(name) {
+    print('mongo-init: ' + name)
+}
+
 function assertOk(result, allowedCodes = []) {
     if (result.ok === 1 || allowedCodes.includes(result.code)) {
         return
@@ -104,32 +108,37 @@ function assertOk(result, allowedCodes = []) {
 }
 
 if (config.shards.countDocuments({_id: 'shard01'}) === 0) {
+    step('add shard01')
     assertOk(admin.runCommand({
         addShard: 'shard01/mongo-shard01-primary:${MONGODB_SHARD01_PRIMARY_PORT},mongo-shard01-secondary1:${MONGODB_SHARD01_SECONDARY1_PORT},mongo-shard01-secondary2:${MONGODB_SHARD01_SECONDARY2_PORT}'
     }))
 }
 
 if (config.shards.countDocuments({_id: 'shard02'}) === 0) {
+    step('add shard02')
     assertOk(admin.runCommand({
         addShard: 'shard02/mongo-shard02-primary:${MONGODB_SHARD02_PRIMARY_PORT},mongo-shard02-secondary1:${MONGODB_SHARD02_SECONDARY1_PORT},mongo-shard02-secondary2:${MONGODB_SHARD02_SECONDARY2_PORT}'
     }))
 }
 
+step('enable sharding')
 assertOk(admin.runCommand({enableSharding: '${MONGODB_DATABASE}'}), [23])
 
 const titleIndex = appdb.events.getIndexes().find((index) => index.name === 'title_1')
 if (titleIndex && titleIndex.unique) {
+    step('drop unique title index')
     appdb.events.dropIndex('title_1')
 }
 
-if (config.collections.countDocuments({_id: '${MONGODB_DATABASE}.events'}) === 0) {
-    appdb.events.createIndex({created_by: 'hashed'})
+if (!config.collections.findOne({_id: '${MONGODB_DATABASE}.events'})) {
+    step('shard events')
     assertOk(admin.runCommand({
         shardCollection: '${MONGODB_DATABASE}.events',
         key: {created_by: 'hashed'}
     }), [23])
 }
 
+step('create indexes')
 appdb.users.createIndex({username: 1}, {unique: true})
 appdb.events.createIndex({title: 1})
 appdb.events.createIndex({title: 1, created_by: 1})
