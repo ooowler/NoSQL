@@ -21,7 +21,8 @@ services:
     ports:
       - "${MONGODB_PORT}:${MONGODB_PORT}"
     depends_on:
-      - mongo-config
+      mongo-rs-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   mongo-config:
@@ -80,11 +81,10 @@ services:
     volumes:
       - mongo-shard02-secondary2-data:/data/db
 
-  mongo-init:
+  mongo-rs-init:
     image: mongo:7
     env_file: .env.local
     depends_on:
-      - mongos
       - mongo-config
       - mongo-shard01-primary
       - mongo-shard01-secondary1
@@ -93,6 +93,18 @@ services:
       - mongo-shard02-secondary1
       - mongo-shard02-secondary2
     entrypoint: ["bash", "/scripts/init-mongo.sh"]
+    command: ["rs"]
+    volumes:
+      - ./scripts/init-mongo.sh:/scripts/init-mongo.sh:ro
+
+  mongo-init:
+    image: mongo:7
+    env_file: .env.local
+    depends_on:
+      mongos:
+        condition: service_started
+    entrypoint: ["bash", "/scripts/init-mongo.sh"]
+    command: ["sharding"]
     volumes:
       - ./scripts/init-mongo.sh:/scripts/init-mongo.sh:ro
 

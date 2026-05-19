@@ -17,6 +17,7 @@ wait_primary() {
     done
 }
 
+init_replica_sets() {
 wait_mongo mongo-config "$MONGODB_CONFIG_PORT"
 wait_mongo mongo-shard01-primary "$MONGODB_SHARD01_PRIMARY_PORT"
 wait_mongo mongo-shard02-primary "$MONGODB_SHARD02_PRIMARY_PORT"
@@ -68,6 +69,9 @@ try {
 wait_primary mongo-config "$MONGODB_CONFIG_PORT"
 wait_primary mongo-shard01-primary "$MONGODB_SHARD01_PRIMARY_PORT"
 wait_primary mongo-shard02-primary "$MONGODB_SHARD02_PRIMARY_PORT"
+}
+
+init_sharding() {
 wait_mongo mongos "$MONGODB_PORT"
 
 mongosh --quiet --host mongos --port "$MONGODB_PORT" --eval "
@@ -100,3 +104,21 @@ if (config.collections.countDocuments({_id: '${MONGODB_DATABASE}.events'}) === 0
     sh.shardCollection('${MONGODB_DATABASE}.events', {created_by: 'hashed'})
 }
 "
+}
+
+case "${1:-all}" in
+    rs)
+        init_replica_sets
+        ;;
+    sharding)
+        init_sharding
+        ;;
+    all)
+        init_replica_sets
+        init_sharding
+        ;;
+    *)
+        echo "unknown init step: $1" >&2
+        exit 1
+        ;;
+esac
