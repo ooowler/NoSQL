@@ -5,15 +5,114 @@ services:
     ports:
       - "${APP_PORT}:${APP_PORT}"
     depends_on:
-      - redis
-      - mongodb
+      redis:
+        condition: service_started
+      mongo-init:
+        condition: service_completed_successfully
 
   redis:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT}:6379"
 
-  mongodb:
+  mongos:
     image: mongo:7
+    command: mongos --configdb cfg/mongo-config:${MONGODB_CONFIG_PORT} --bind_ip_all --port ${MONGODB_PORT}
     ports:
-      - "${MONGODB_PORT}:27017"
+      - "${MONGODB_PORT}:${MONGODB_PORT}"
+    depends_on:
+      mongo-rs-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  mongo-config:
+    image: mongo:7
+    command: mongod --configsvr --replSet cfg --bind_ip_all --port ${MONGODB_CONFIG_PORT} --dbpath /data/configdb
+    ports:
+      - "${MONGODB_CONFIG_PORT}:${MONGODB_CONFIG_PORT}"
+    volumes:
+      - mongo-config-data:/data/configdb
+
+  mongo-shard01-primary:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard01 --bind_ip_all --port ${MONGODB_SHARD01_PRIMARY_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD01_PRIMARY_PORT}:${MONGODB_SHARD01_PRIMARY_PORT}"
+    volumes:
+      - mongo-shard01-primary-data:/data/db
+
+  mongo-shard01-secondary1:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard01 --bind_ip_all --port ${MONGODB_SHARD01_SECONDARY1_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD01_SECONDARY1_PORT}:${MONGODB_SHARD01_SECONDARY1_PORT}"
+    volumes:
+      - mongo-shard01-secondary1-data:/data/db
+
+  mongo-shard01-secondary2:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard01 --bind_ip_all --port ${MONGODB_SHARD01_SECONDARY2_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD01_SECONDARY2_PORT}:${MONGODB_SHARD01_SECONDARY2_PORT}"
+    volumes:
+      - mongo-shard01-secondary2-data:/data/db
+
+  mongo-shard02-primary:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard02 --bind_ip_all --port ${MONGODB_SHARD02_PRIMARY_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD02_PRIMARY_PORT}:${MONGODB_SHARD02_PRIMARY_PORT}"
+    volumes:
+      - mongo-shard02-primary-data:/data/db
+
+  mongo-shard02-secondary1:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard02 --bind_ip_all --port ${MONGODB_SHARD02_SECONDARY1_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD02_SECONDARY1_PORT}:${MONGODB_SHARD02_SECONDARY1_PORT}"
+    volumes:
+      - mongo-shard02-secondary1-data:/data/db
+
+  mongo-shard02-secondary2:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard02 --bind_ip_all --port ${MONGODB_SHARD02_SECONDARY2_PORT} --dbpath /data/db
+    ports:
+      - "${MONGODB_SHARD02_SECONDARY2_PORT}:${MONGODB_SHARD02_SECONDARY2_PORT}"
+    volumes:
+      - mongo-shard02-secondary2-data:/data/db
+
+  mongo-rs-init:
+    image: mongo:7
+    env_file: .env.local
+    depends_on:
+      - mongo-config
+      - mongo-shard01-primary
+      - mongo-shard01-secondary1
+      - mongo-shard01-secondary2
+      - mongo-shard02-primary
+      - mongo-shard02-secondary1
+      - mongo-shard02-secondary2
+    entrypoint: ["bash", "/scripts/init-mongo.sh"]
+    command: ["rs"]
+    volumes:
+      - ./scripts/init-mongo.sh:/scripts/init-mongo.sh:ro
+
+  mongo-init:
+    image: mongo:7
+    env_file: .env.local
+    depends_on:
+      mongos:
+        condition: service_started
+    entrypoint: ["bash", "/scripts/init-mongo.sh"]
+    command: ["sharding"]
+    volumes:
+      - ./scripts/init-mongo.sh:/scripts/init-mongo.sh:ro
+
+volumes:
+  mongo-config-data:
+  mongo-shard01-primary-data:
+  mongo-shard01-secondary1-data:
+  mongo-shard01-secondary2-data:
+  mongo-shard02-primary-data:
+  mongo-shard02-secondary1-data:
+  mongo-shard02-secondary2-data:
