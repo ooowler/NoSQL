@@ -451,6 +451,11 @@ def reactions_for_title(r: redis_lib.Redis, title: str) -> dict[str, int]:
     return reactions
 
 
+def cache_reactions_for_title(r: redis_lib.Redis, title: str) -> None:
+    reactions = reactions_from_cassandra(title)
+    r.setex(reaction_cache_key(title), get_like_ttl(), json.dumps(reactions))
+
+
 def reactions_by_title(docs: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     r = get_redis()
     return {title: reactions_for_title(r, title) for title in {event_title(doc) for doc in docs}}
@@ -848,7 +853,7 @@ def save_event_reaction(event: dict[str, Any], user_id: str, like_value: int, r:
         ),
         (event_id, like_value, user_id, datetime.now(timezone.utc)),
     )
-    r.delete(reaction_cache_key(event_title(event)))
+    cache_reactions_for_title(r, event_title(event))
 
 
 def react_to_event(
