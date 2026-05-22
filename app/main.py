@@ -407,14 +407,22 @@ def empty_reactions() -> dict[str, int]:
     return {"likes": 0, "dislikes": 0}
 
 
-def cached_reactions(raw: Optional[str]) -> Optional[dict[str, int]]:
-    if not raw:
+def parse_reactions(data: dict[str, Any]) -> dict[str, int]:
+    return {"likes": int(data.get("likes", 0)), "dislikes": int(data.get("dislikes", 0))}
+
+
+def cached_reactions(r: redis_lib.Redis, key: str) -> Optional[dict[str, int]]:
+    key_type = r.type(key)
+    if key_type == "none":
         return None
     try:
-        data = json.loads(raw)
-        return {"likes": int(data.get("likes", 0)), "dislikes": int(data.get("dislikes", 0))}
+        if key_type == "hash":
+            return parse_reactions(r.hgetall(key))
+        if key_type == "string":
+            return parse_reactions(json.loads(r.get(key) or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+    return None
 
 
 def event_ids_with_title(title: str) -> list[str]:
@@ -442,18 +450,26 @@ def reactions_from_cassandra(title: str) -> dict[str, int]:
 
 def reactions_for_title(r: redis_lib.Redis, title: str) -> dict[str, int]:
     key = reaction_cache_key(title)
-    cached = cached_reactions(r.get(key))
+    cached = cached_reactions(r, key)
     if cached is not None:
         return cached
     reactions = reactions_from_cassandra(title)
     if reactions["likes"] or reactions["dislikes"]:
-        r.setex(key, get_like_ttl(), json.dumps(reactions))
+        cache_reactions(r, key, reactions)
     return reactions
+
+
+def cache_reactions(r: redis_lib.Redis, key: str, reactions: dict[str, int]) -> None:
+    pipe = r.pipeline()
+    pipe.delete(key)
+    pipe.hset(key, mapping={"likes": reactions["likes"], "dislikes": reactions["dislikes"]})
+    pipe.expire(key, get_like_ttl())
+    pipe.execute()
 
 
 def cache_reactions_for_title(r: redis_lib.Redis, title: str) -> None:
     reactions = reactions_from_cassandra(title)
-    r.setex(reaction_cache_key(title), get_like_ttl(), json.dumps(reactions))
+    cache_reactions(r, reaction_cache_key(title), reactions)
 
 
 def reactions_by_title(docs: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
