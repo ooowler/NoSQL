@@ -7,6 +7,8 @@ services:
     depends_on:
       redis:
         condition: service_started
+      cassandra-init:
+        condition: service_completed_successfully
       mongo-init:
         condition: service_completed_successfully
 
@@ -14,6 +16,28 @@ services:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT}:6379"
+
+  cassandra-test:
+    image: cassandra:4.1
+    ports:
+      - "${CASSANDRA_PORT}:9042"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  cassandra-init:
+    image: cassandra:4.1
+    env_file: .env.local
+    depends_on:
+      cassandra-test:
+        condition: service_healthy
+    entrypoint: ["bash", "/scripts/init-cassandra.sh"]
+    volumes:
+      - ./scripts/init-cassandra.sh:/scripts/init-cassandra.sh:ro
 
   mongos:
     image: mongo:7
@@ -116,3 +140,4 @@ volumes:
   mongo-shard02-primary-data:
   mongo-shard02-secondary1-data:
   mongo-shard02-secondary2-data:
+  cassandra-data:
