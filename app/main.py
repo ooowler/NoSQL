@@ -51,7 +51,7 @@ async def lifespan(fastapi_app: FastAPI):
     client = MongoClient(uri)
     fastapi_app.state.mongo_db = client[name]
     cassandra_cluster, cassandra_session = connect_cassandra()
-    prepare_cassandra(cassandra_session)
+    select_cassandra_keyspace(cassandra_session)
     fastapi_app.state.cassandra_cluster = cassandra_cluster
     fastapi_app.state.cassandra_session = cassandra_session
     try:
@@ -137,36 +137,9 @@ def cassandra_execute(session: Session, query: str, params: Optional[tuple] = No
     return session.execute(statement, params or ())
 
 
-def prepare_cassandra(session: Session) -> None:
+def select_cassandra_keyspace(session: Session) -> None:
     keyspace = cql_name(os.environ.get("CASSANDRA_KEYSPACE") or "testkeyspace")
-    cassandra_execute(
-        session,
-        (
-            f"CREATE KEYSPACE IF NOT EXISTS {keyspace} "
-            "WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}"
-        ),
-    )
     session.set_keyspace(keyspace)
-    cassandra_execute(
-        session,
-        """
-        CREATE TABLE IF NOT EXISTS event_reactions (
-            event_id text,
-            like_value tinyint,
-            created_by text,
-            created_at timestamp,
-            PRIMARY KEY ((event_id), created_by)
-        )
-        """,
-    )
-    cassandra_execute(
-        session,
-        "CREATE INDEX IF NOT EXISTS event_reactions_like_value_idx ON event_reactions (like_value)",
-    )
-    cassandra_execute(
-        session,
-        "CREATE INDEX IF NOT EXISTS event_reactions_created_by_idx ON event_reactions (created_by)",
-    )
 
 
 def new_sid() -> str:

@@ -7,8 +7,8 @@ services:
     depends_on:
       redis:
         condition: service_started
-      cassandra-test:
-        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
       mongo-init:
         condition: service_completed_successfully
 
@@ -28,6 +28,16 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+
+  cassandra-init:
+    image: cassandra:4.1
+    env_file: .env.local
+    depends_on:
+      cassandra-test:
+        condition: service_healthy
+    entrypoint: ["bash", "/scripts/init-cassandra.sh"]
+    volumes:
+      - ./scripts/init-cassandra.sh:/scripts/init-cassandra.sh:ro
 
   mongos:
     image: mongo:7
