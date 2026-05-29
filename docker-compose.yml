@@ -11,11 +11,33 @@ services:
         condition: service_completed_successfully
       mongo-init:
         condition: service_completed_successfully
+      neo4j-init:
+        condition: service_completed_successfully
 
   redis:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT}:6379"
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME}/${NEO4J_PASSWORD}"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+
+  neo4j-init:
+    image: neo4j:5
+    env_file: .env.local
+    depends_on:
+      neo4j:
+        condition: service_started
+    entrypoint: ["bash", "/scripts/init-neo4j.sh"]
+    volumes:
+      - ./scripts/init-neo4j.sh:/scripts/init-neo4j.sh:ro
 
   cassandra-test:
     image: cassandra:4.1
@@ -141,3 +163,4 @@ volumes:
   mongo-shard02-secondary1-data:
   mongo-shard02-secondary2-data:
   cassandra-data:
+  neo4j-data:
