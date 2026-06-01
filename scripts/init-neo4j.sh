@@ -3,6 +3,7 @@ set -euo pipefail
 
 host="${NEO4J_HOST:-neo4j}"
 port="${NEO4J_PORT:-7687}"
+port="${port#:}"
 username="${NEO4J_USERNAME:-neo4j}"
 password="${NEO4J_PASSWORD:-password}"
 uri="bolt://${host}:${port}"
